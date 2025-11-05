@@ -1,0 +1,33 @@
+{
+  "name": "trading-backtest-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext ts,tsx --max-warnings=0"
+  },
+  "dependencies": {
+    "axios": "^1.6.7",
+    "lightweight-charts": "^4.1.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+  "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.22.1",
+    "recharts": "^2.7.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.58",
+    "@types/react-dom": "^18.2.19",
+    "@types/react-router-dom": "^5.3.3",
+    "@vitejs/plugin-react": "^4.2.1",
+  "@typescript-eslint/eslint-plugin": "^6.18.1",
+  "@typescript-eslint/parser": "^6.18.1",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.33.2",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.10"
+  }
+}

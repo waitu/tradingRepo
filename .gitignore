@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+backend/backtest.db
+.env
+.venv/
+venv/
+
+data/*.csv
+
+# Node
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
