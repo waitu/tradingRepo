@@ -43,6 +43,15 @@ class _InputShim:
     """Simple callable that mimics Pine's input helpers by returning the default value."""
 
     def __call__(self, first_arg=None, *args, **kwargs):  # type: ignore[override]
+        options = kwargs.get("options")
+        if isinstance(options, (list, tuple)) and options:
+            if isinstance(first_arg, str) and first_arg in options:
+                return first_arg
+            if isinstance(first_arg, (int, float)):
+                index = int(first_arg)
+                if 0 <= index < len(options):
+                    return options[index]
+            return options[0]
         if first_arg is None and "defval" in kwargs:
             return kwargs["defval"]
         return first_arg
