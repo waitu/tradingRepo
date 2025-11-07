@@ -52,6 +52,7 @@ endMonth = input.int(12, "End Month")
 endDay = input.int(31, "End Day")
 
 trade_option = input.string("Both", "Trade Option", options=["Long Only", "Short Only", "Both"])
+use_kema = input.bool(false, "Use KEMA (Adaptive EMA)")
 
 kema = ta.ema(close, length_ema)
 atr = ta.atr(length_atr)
@@ -68,6 +69,11 @@ if crossunder(close, lower_band)
 else if crossover(close, upper_band)
     strategy.close("Short")
 """
+
+PINE_KEMA_WITH_TOGGLE_CODE = PINE_KEMA_CODE.replace(
+    "input.bool(false, \"Use KEMA (Adaptive EMA)\")",
+    "input.bool(true, \"Use KEMA (Adaptive EMA)\")",
+)
 
 
 def test_backtest_engine_ma_cross_generates_profit():
@@ -146,3 +152,24 @@ def test_backtest_engine_kema_respects_warmup_before_trades():
         else:
             earliest_allowed_time = annotated[first_indicator_idx].timestamp
         assert earliest_entry >= earliest_allowed_time
+
+
+def test_backtest_engine_kema_toggle_outputs_adaptive_indicator():
+    db = _setup_session()
+    _seed_candles(db)
+
+    request = BacktestRequest(
+        initialCapital=1_000.0,
+        tradingFee=0.1,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        strategyRules=PineScriptStrategy(type="pine_script", code=PINE_KEMA_WITH_TOGGLE_CODE),
+    )
+
+    result = run_backtest(db, request)
+
+    assert "KEMA Adaptive" in result.indicatorLines
+    annotated = result.annotatedCandles
+    assert any(
+        candle.indicators.get("KEMA Adaptive") is not None for candle in annotated
+    ), "Expected adaptive KEMA values in annotated candles"

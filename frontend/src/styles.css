@@ -422,6 +422,8 @@ body {
 .pine-template-actions {
   margin: 10px 0 0;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .pine-template-actions .secondary-button {
@@ -1616,6 +1618,26 @@ body {
 }
 
 .strategy-actions .link-button {
+  align-self: flex-start;
+}
+
+.strategy-presets {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(72, 94, 140, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.strategy-presets .preset-label {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.strategy-presets .secondary-button {
   align-self: flex-start;
 }
 

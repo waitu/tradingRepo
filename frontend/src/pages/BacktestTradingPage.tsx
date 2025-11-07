@@ -19,48 +19,125 @@ import {
 } from "../api/types";
 
 const timeframeOptions = ["1h", "4h", "1d"];
-const defaultPineScript = `//@version=5
-strategy("MA Cross", overlay=true)
-fastLength = input.int(10, minval=1, title="Fast MA")
-slowLength = input.int(25, minval=1, title="Slow MA")
-fastMA = ta.sma(close, fastLength)
-slowMA = ta.sma(close, slowLength)
-if ta.crossover(fastMA, slowMA)
-    strategy.entry("Long", strategy.long)
-if ta.crossunder(fastMA, slowMA)
-    strategy.close("Long")`;
 
-const kemaOptionTemplate = `//@version=4
-strategy("KEMA Option Strategy", overlay=true)
+const kemaOptionTemplate = `//@version=5
+strategy("KEMA True Adaptive Strategy", overlay=true, margin_long=100, margin_short=100)
 
-length_ema = input.int(21, "EMA Length", minval=1)
-length_atr = input.int(14, "ATR Length", minval=1)
-volatility_factor = input.float(1.2, "Volatility Factor", step=0.1)
-initial_risk = input(2, "Initial Risk (%)", minval=0.1, maxval=5, step=0.1) / 100
-risk_equity = input(0.5, "Risk Equity (%)", minval=0.1, maxval=5, step=0.1) / 100
+// === Inputs ===
+length = input.int(20, "Base Length", minval=1)
+process_noise = input.float(0.01, "Process Noise (Q)", step=0.001)
+measurement_noise = input.float(0.1, "Measurement Noise (R)", step=0.001)
+volatility_factor = input.float(1.5, "Volatility Factor", step=0.1)
+atr_len = input.int(14, "ATR Length", minval=1)
 trade_option = input.string("Both", "Trade Option", options=["Long Only", "Short Only", "Both"])
 
-startYear = input.int(2020, "Start Year")
-startMonth = input.int(1, "Start Month")
-startDay = input.int(1, "Start Day")
-endYear = input.int(2030, "End Year")
-endMonth = input.int(12, "End Month")
-endDay = input.int(31, "End Day")
+// === Kalman Filter EMA ===
+var float estimate = na
+var float error_cov = 1.0
 
-kema = ta.ema(close, length_ema)
-atr = ta.atr(length_atr)
+src = close
+Q = process_noise
+R = measurement_noise
+
+if na(estimate)
+    estimate := src
+else
+    // Prediction
+    estimate := estimate
+    error_cov := error_cov + Q
+
+    // Update
+    K = error_cov / (error_cov + R)
+    estimate := estimate + K * (src - estimate)
+    error_cov := (1 - K) * error_cov
+
+kema = estimate
+
+// === Volatility Band ===
+atr = ta.atr(atr_len)
 upper_band = kema + volatility_factor * atr
 lower_band = kema - volatility_factor * atr
 
-if crossover(close, upper_band)
-    strategy.entry("Long", strategy.long)
-else if crossunder(close, lower_band)
-    strategy.entry("Short", strategy.short)
+// === Entry/Exit Conditions ===
+longEntry  = ta.crossover(close, upper_band)
+shortEntry = ta.crossunder(close, lower_band)
+longExit   = ta.crossunder(close, lower_band)
+shortExit  = ta.crossover(close, upper_band)
 
-if crossunder(close, lower_band)
-    strategy.close("Long")
-else if crossover(close, upper_band)
-    strategy.close("Short")`;
+if trade_option == "Long Only" or trade_option == "Both"
+    if longEntry
+        strategy.entry("Long", strategy.long)
+    if longExit
+        strategy.close("Long")
+
+if trade_option == "Short Only" or trade_option == "Both"
+    if shortEntry
+        strategy.entry("Short", strategy.short)
+    if shortExit
+        strategy.close("Short")
+
+// === Plots ===
+plot(kema, color=color.new(color.blue, 0), title="KEMA", linewidth=2)
+plot(upper_band, color=color.new(color.red, 0), title="Upper Band", linewidth=1)
+plot(lower_band, color=color.new(color.green, 0), title="Lower Band", linewidth=1)`;
+
+const emaAtrBreakoutTemplate = `//@version=4
+strategy("KEMA-Option", overlay=true)
+length_ema = input(15, minval=1, title="Length EMA")
+length_atr = input(14, minval=1, title="Length ATR")
+volatility_factor = input(1, title="Volatility Factor", type=input.float)
+initial_risk = input(2, title="% Initial Risk", type=input.float) / 100
+risk_equity = input(50, title="% Risk Equity", type=input.float) / 100
+trade_option = input("Both", title="Trade Option", options=["Long Only", "Short Only", "Both"])
+use_kema = input.bool(false, "Use KEMA (Adaptive EMA)")
+equity = strategy.equity
+startYear = input(1900, title="Start Year", minval=1900)
+startMonth = input(1, title="Start Month", minval=1, maxval=12)
+startDay = input(1, title="Start Day", minval=1, maxval=31)
+endYear = input(2024, title="End Year", minval=1900)
+endMonth = input(12, title="End Month", minval=1, maxval=12)
+endDay = input(31, title="End Day", minval=1, maxval=31)
+startDate = timestamp(startYear, startMonth, startDay, 00, 00)
+endDate = timestamp(endYear, endMonth, endDay, 23, 59)
+src = close
+ema_val = ema(src, length_ema)
+atr_val = ema(tr, length_atr)
+f_atr = 1 + (atr_val / ema_val)
+kema_val = ema(src, length_ema * f_atr)
+mid_val = use_kema ? kema_val : ema_val
+upper_band = mid_val + volatility_factor * atr_val
+lower_band = mid_val - volatility_factor * atr_val
+ready = not na(ema_val) and not na(atr_val) and (not use_kema or not na(kema_val))
+// Entry conditions
+longEntry = crossover(close, upper_band)
+shortEntry = crossunder(close, lower_band)
+// Exit conditions
+longExit = crossunder(close, lower_band)
+shortExit = crossover(close, upper_band)
+delta = upper_band - lower_band
+contractsDelta = max(floor((initial_risk * equity) / (delta) * 10000) / 10000, 0.0001)
+contractsATR = max(floor((initial_risk * equity) / (atr_val) * 10000) / 10000, 0.0001)
+contractsEquityRisk = max(floor((risk_equity * equity) / (close) * 10000) / 10000, 0.0001)
+contracts = min(contractsDelta, contractsATR, contractsEquityRisk)
+if (time >= startDate and time <= endDate) and ready
+  if (trade_option == "Long Only" or trade_option == "Both")
+    if (longEntry)
+      strategy.entry("Long", strategy.long, contracts)
+    if (longExit)
+      strategy.close("Long")
+  if (trade_option == "Short Only" or trade_option == "Both")
+    if (shortEntry)
+      strategy.entry("Short", strategy.short, contracts)
+    if (shortExit)
+      strategy.close("Short")
+else if (time[1] <= endDate)
+  strategy.close_all()
+plot(ema_val, color=color.blue, linewidth=1, title="EMA")
+plot(kema_val, color=color.orange, linewidth=1, title="KEMA Adaptive")
+plot(upper_band, color=color.red, linewidth=1, title="Upper")
+plot(lower_band, color=color.green, linewidth=1, title="Lower")`;
+
+const defaultPineScript = emaAtrBreakoutTemplate;
 
 const PINE_STORAGE_KEY = "backtest:pineScript";
 const STRATEGY_STORAGE_KEY = "backtest:strategyType";
@@ -199,9 +276,9 @@ const BacktestTradingPage = () => {
   const [startTime, setStartTime] = useState<string>("");
   const [endTime, setEndTime] = useState<string>("");
   const [strategyType, setStrategyType] = useState<StrategyType>(() => {
-    if (typeof window === "undefined") return "moving_average_cross";
+    if (typeof window === "undefined") return "pine_script";
     const stored = window.localStorage.getItem(STRATEGY_STORAGE_KEY) as StrategyType | null;
-    return stored === "pine_script" || stored === "moving_average_cross" ? stored : "moving_average_cross";
+    return stored === "pine_script" || stored === "moving_average_cross" ? stored : "pine_script";
   });
   const [fastWindow, setFastWindow] = useState<number>(10);
   const [slowWindow, setSlowWindow] = useState<number>(25);
@@ -843,12 +920,20 @@ const BacktestTradingPage = () => {
                   className="secondary-button"
                   onClick={() => setPineScript(kemaOptionTemplate)}
                 >
-                  Load KEMA option template
+                  Load KEMA adaptive template
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setPineScript(emaAtrBreakoutTemplate)}
+                >
+                  Load EMA breakout template (KEMA toggle)
                 </button>
               </div>
               <p className="hint">
                 Define inputs with <code>input.*</code> to surface adjustable parameters below without leaving the
-                controls panel.
+                controls panel. Load the EMA breakout template to get a <strong>Use KEMA (Adaptive EMA)</strong> toggle in
+                the Pine inputs list.
               </p>
             </div>
           )}
@@ -1229,6 +1314,35 @@ const BacktestTradingPage = () => {
                     onClick={() => setStrategyType("pine_script")}
                   >
                     Pine Script
+                  </button>
+                </div>
+                <div className="strategy-presets">
+                  <div className="preset-label">Templates</div>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      setStrategyType("pine_script");
+                      setPineScript(kemaOptionTemplate);
+                      setActiveCodeTab("pine");
+                      setIsCodePanelOpen(true);
+                      toast.success("Loaded KEMA adaptive template");
+                    }}
+                  >
+                    Load KEMA adaptive template
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      setStrategyType("pine_script");
+                      setPineScript(emaAtrBreakoutTemplate);
+                      setActiveCodeTab("pine");
+                      setIsCodePanelOpen(true);
+                      toast.success("Loaded EMA breakout template (toggle KEMA inside)");
+                    }}
+                  >
+                    Load EMA breakout template (KEMA toggle)
                   </button>
                 </div>
               </section>

@@ -122,6 +122,13 @@ def _parse_args() -> argparse.Namespace:
         "--end-date",
         help="Override backtest end date (YYYY-MM-DD or ISO8601)",
     )
+    parser.add_argument(
+        "--use-kema",
+        dest="use_kema",
+        action="store_true",
+        default=None,
+        help="Enable adaptive KEMA mid-band when supported by the Pine script",
+    )
     return parser.parse_args()
 
 
@@ -250,6 +257,8 @@ def _parse_override_date(value: Optional[str]) -> Optional[datetime]:
 
 
 def _apply_overrides(config: KemaOptionConfig, args: argparse.Namespace) -> KemaOptionConfig:
+    resolved_use_kema = config.use_kema if args.use_kema is None else args.use_kema
+
     updated = KemaOptionConfig(
         ema_length=args.ema_length or config.ema_length,
         atr_length=args.atr_length or config.atr_length,
@@ -260,6 +269,7 @@ def _apply_overrides(config: KemaOptionConfig, args: argparse.Namespace) -> Kema
         trade_option=args.trade_option or config.trade_option,
         start_date=_parse_override_date(args.start_date) if args.start_date else config.start_date,
         end_date=_parse_override_date(args.end_date) if args.end_date else config.end_date,
+        use_kema=resolved_use_kema,
     )
 
     # Basic validation to avoid invalid values slipping through CLI overrides
@@ -273,7 +283,7 @@ def _apply_overrides(config: KemaOptionConfig, args: argparse.Namespace) -> Kema
     return updated
 
 
-def _export_csv(output_path: Path, candles: List[CsvCandle], response) -> None:
+def _export_csv(output_path: Path, candles: List[CsvCandle], response, use_kema: bool) -> None:
     annotated = response.annotatedCandles
     if len(annotated) != len(candles):
         raise RuntimeError("Annotated candle count does not match input rows")
@@ -281,26 +291,34 @@ def _export_csv(output_path: Path, candles: List[CsvCandle], response) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["time", "open", "high", "low", "close", "EMA", "Upper", "Lower", "Volume"])
+        header = ["time", "open", "high", "low", "close", "EMA"]
+        if use_kema:
+            header.append("KEMA")
+        header.extend(["Upper", "Lower", "Volume"])
+        writer.writerow(header)
         for candle, annotated_candle in zip(candles, annotated):
             timestamp = annotated_candle.timestamp
             epoch_seconds = int(timestamp.timestamp())
             ema = annotated_candle.indicators.get("EMA")
             upper = annotated_candle.indicators.get("Upper Band")
             lower = annotated_candle.indicators.get("Lower Band")
-            writer.writerow(
-                [
-                    epoch_seconds,
-                    _format_float(candle.open),
-                    _format_float(candle.high),
-                    _format_float(candle.low),
-                    _format_float(candle.close),
-                    _format_float(ema),
-                    _format_float(upper),
-                    _format_float(lower),
-                    _format_float(candle.volume),
-                ]
-            )
+            row = [
+                epoch_seconds,
+                _format_float(candle.open),
+                _format_float(candle.high),
+                _format_float(candle.low),
+                _format_float(candle.close),
+                _format_float(ema),
+            ]
+            if use_kema:
+                kema = annotated_candle.indicators.get("KEMA Adaptive")
+                row.append(_format_float(kema))
+            row.extend([
+                _format_float(upper),
+                _format_float(lower),
+                _format_float(candle.volume),
+            ])
+            writer.writerow(row)
 
 
 def main() -> None:
@@ -327,7 +345,7 @@ def main() -> None:
     )
 
     response = _run_kema_option(candles, strategy_config, request)
-    _export_csv(args.output, candles, response)
+    _export_csv(args.output, candles, response, strategy_config.use_kema)
     print(f"Exported {len(candles)} rows to {args.output}")
 
 

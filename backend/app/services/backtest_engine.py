@@ -477,6 +477,7 @@ def _run_kema_option(
 
     ema_value: Optional[float] = None
     atr_value: Optional[float] = None
+    kema_value: Optional[float] = None
     ema_seed: List[float] = []
     atr_seed: List[float] = []
     prev_close: Optional[float] = None
@@ -491,6 +492,8 @@ def _run_kema_option(
         "Upper Band": [],
         "Lower Band": [],
     }
+    if strategy.use_kema:
+        indicator_values["KEMA Adaptive"] = []
     annotated_candles: List[AnnotatedCandle] = []
 
     for candle in candles:
@@ -617,10 +620,26 @@ def _run_kema_option(
 
         upper_band: Optional[float] = None
         lower_band: Optional[float] = None
+        mid_value: Optional[float] = None
         if ema_value is not None and atr_value is not None:
-            # Keltner-style channel: upper = EMA + k * ATR, lower = EMA - k * ATR.
-            upper_band = ema_value + strategy.volatility_factor * atr_value
-            lower_band = ema_value - strategy.volatility_factor * atr_value
+            if strategy.use_kema:
+                if len(ema_seed) >= strategy.ema_length:
+                    if kema_value is None or not math.isfinite(kema_value):
+                        # Seed KEMA with the same bootstrap EMA (SMA of initial window).
+                        kema_value = ema_value
+                    else:
+                        denom = ema_value if abs(ema_value) > 1e-12 else (1e-12 if ema_value >= 0 else -1e-12)
+                        f_atr = 1.0 + (atr_value / denom)
+                        effective_length = max(strategy.ema_length * f_atr, 1e-6)
+                        alpha = 2.0 / (effective_length + 1.0)
+                        kema_value = alpha * price + (1 - alpha) * kema_value
+                mid_value = kema_value if kema_value is not None else ema_value
+            else:
+                mid_value = ema_value
+
+            if mid_value is not None:
+                upper_band = mid_value + strategy.volatility_factor * atr_value
+                lower_band = mid_value - strategy.volatility_factor * atr_value
         warmup_complete = bar_index + 1 >= warmup_bars
         current_upper_band = upper_band if warmup_complete else None
         current_lower_band = lower_band if warmup_complete else None
@@ -632,6 +651,8 @@ def _run_kema_option(
             and current_lower_band is not None
         ):
             indicator_values["EMA"].append((timestamp, ema_value))
+            if strategy.use_kema and kema_value is not None:
+                indicator_values["KEMA Adaptive"].append((timestamp, kema_value))
             indicator_values["Upper Band"].append((timestamp, current_upper_band))
             indicator_values["Lower Band"].append((timestamp, current_lower_band))
 
@@ -753,6 +774,10 @@ def _run_kema_option(
             "Upper Band": current_upper_band,
             "Lower Band": current_lower_band,
         }
+        if strategy.use_kema:
+            indicator_snapshot["KEMA Adaptive"] = (
+                kema_value if warmup_complete and kema_value is not None else None
+            )
         annotated_candles.append(
             AnnotatedCandle(
                 timestamp=timestamp,

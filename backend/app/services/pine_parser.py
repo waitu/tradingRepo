@@ -22,6 +22,7 @@ class KemaOptionConfig:
     trade_option: str  # "long_only", "short_only", "both"
     start_date: Optional[datetime]
     end_date: Optional[datetime]
+    use_kema: bool = False
 
     @property
     def type(self) -> str:
@@ -99,9 +100,15 @@ def _safe_eval_expr(expr: str) -> Optional[Union[int, float, str]]:
         if isinstance(node, ast.Constant):
             return node.value  # type: ignore[return-value]
         if isinstance(node, ast.Name):
-            if node.id in env:
-                return env[node.id]  # type: ignore[return-value]
-            raise PineScriptParseError(f"Unsupported identifier in expression: {node.id}")
+            name = node.id
+            if name in env:
+                return env[name]  # type: ignore[return-value]
+            lowered = name.lower()
+            if lowered == "true":
+                return True
+            if lowered == "false":
+                return False
+            raise PineScriptParseError(f"Unsupported identifier in expression: {name}")
         if isinstance(node, ast.Attribute):
             value = _evaluate(node.value)
             return getattr(value, node.attr)  # type: ignore[return-value]
@@ -169,6 +176,7 @@ def _parse_kema_option(code: str) -> Optional[KemaOptionConfig]:
     initial_risk = _evaluate("initial_risk")
     risk_equity = _evaluate("risk_equity")
     trade_option = _evaluate("trade_option")
+    use_kema_value = _evaluate("use_kema")
 
     if not all(
         value is not None
@@ -192,6 +200,15 @@ def _parse_kema_option(code: str) -> Optional[KemaOptionConfig]:
         "short only": "short_only",
     }
     normalized_trade_option = trade_option_map.get(trade_option_str, "both")
+
+    use_kema_bool = False
+    if use_kema_value is not None:
+        if isinstance(use_kema_value, str):
+            use_kema_bool = use_kema_value.strip().lower() in {"true", "1", "yes"}
+        elif isinstance(use_kema_value, (int, float)):
+            use_kema_bool = bool(use_kema_value)
+        elif isinstance(use_kema_value, bool):
+            use_kema_bool = use_kema_value
 
     start_year = _evaluate("startYear")
     start_month = _evaluate("startMonth")
@@ -225,6 +242,7 @@ def _parse_kema_option(code: str) -> Optional[KemaOptionConfig]:
         trade_option=normalized_trade_option,
         start_date=start_date,
         end_date=end_date,
+        use_kema=use_kema_bool,
     )
 
 
