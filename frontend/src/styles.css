@@ -679,6 +679,26 @@ body {
   accent-color: var(--accent-secondary);
 }
 
+.panel-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.panel-checkbox input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-secondary);
+}
+
+.panel-checkbox span {
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
 .strategy-form .hint {
   font-size: 11px;
   color: var(--text-muted);
@@ -713,9 +733,62 @@ body {
   animation: status-pulse 2.4s infinite ease-in-out;
 }
 
+.card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.card-heading h2 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-primary);
+  letter-spacing: 0.04em;
+}
+
+.indicator-toggle-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-muted);
+}
+
+.indicator-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+
+.indicator-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-secondary);
+}
+
+.indicator-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(22, 30, 44, 0.6), 0 0 0 2px rgba(18, 22, 34, 0.8);
+}
+
+.indicator-label {
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-primary);
+  animation: none;
+}
+
 .chart-card,
 .equity-card,
-.trades-card {
+.trades-card,
+.config-card {
   position: relative;
   background: var(--surface-overlay);
   border-radius: 6px;
@@ -830,7 +903,8 @@ body {
 
 .chart-card::after,
 .equity-card::after,
-.trades-card::after {
+.trades-card::after,
+.config-card::after {
   content: "";
   position: absolute;
   inset: -1px;
@@ -842,15 +916,51 @@ body {
 
 .chart-card:hover,
 .equity-card:hover,
-.trades-card:hover {
+.trades-card:hover,
+.config-card:hover {
   border-color: rgba(30, 227, 255, 0.4);
   box-shadow: 0 0 0 1px rgba(30, 227, 255, 0.25);
 }
 
 .chart-card:hover::after,
 .equity-card:hover::after,
-.trades-card:hover::after {
+.trades-card:hover::after,
+.config-card:hover::after {
   opacity: 1;
+}
+
+.config-card .card-header h3 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.config-card .card-header span {
+  animation: none;
+  color: rgba(123, 138, 185, 0.9);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px 18px;
+}
+
+.config-item .label {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.config-item .value {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
 .equity-chart .recharts-responsive-container {

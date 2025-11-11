@@ -21,9 +21,10 @@ type Props = {
   indicatorLines?: Record<string, IndicatorPoint[]>;
   focusRequest?: { time: string; requestId: number } | null;
   onFocusHandled?: () => void;
+  indicatorColors?: Record<string, string>;
 };
 
-const indicatorPalette = ["#18c5ff", "#f48fb1", "#ffd54f", "#c5e1a5", "#b39ddb", "#80cbc4"];
+export const indicatorPalette = ["#18c5ff", "#f48fb1", "#ffd54f", "#c5e1a5", "#b39ddb", "#80cbc4"];
 
 const CandlestickChart = ({
   candles,
@@ -33,6 +34,7 @@ const CandlestickChart = ({
   indicatorLines = {},
   focusRequest,
   onFocusHandled,
+  indicatorColors,
 }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -268,13 +270,16 @@ const CandlestickChart = ({
         return;
       }
       let series = seriesMap.get(name);
+      const paletteColor = indicatorColors?.[name] ?? indicatorPalette[index % indicatorPalette.length];
       if (!series) {
         series = chart.addLineSeries({
-          color: indicatorPalette[index % indicatorPalette.length],
+          color: paletteColor,
           lineWidth: 2,
           title: name,
         });
         seriesMap.set(name, series);
+      } else if (indicatorColors?.[name]) {
+        series.applyOptions({ color: paletteColor });
       }
 
       const data = points
@@ -294,7 +299,7 @@ const CandlestickChart = ({
 
       series.setData(data);
     });
-  }, [indicatorLines]);
+  }, [indicatorLines, indicatorColors]);
 
   useEffect(() => {
     if (!chartRef.current) {

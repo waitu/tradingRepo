@@ -49,9 +49,13 @@ export interface BacktestResponse {
   maxDrawdown: number;
   winrate: number;
   numberOfTrades: number;
+  breakevenTrades: number;
   equityCurve: EquityPoint[];
   executedTrades: TradeResult[];
   indicatorLines: Record<string, IndicatorPoint[]>;
+  lot_size: number;
+  round_quantity: boolean;
+  execution_model: "close_signal_bar" | "open_next_bar";
 }
 
 export type StrategyType = "moving_average_cross" | "pine_script";
@@ -79,4 +83,7 @@ export interface BacktestRequestPayload {
   strategyRules: StrategyRules;
   startTime?: string;
   endTime?: string;
+  lot_size: number;
+  round_quantity: boolean;
+  execution_model: "close_signal_bar" | "open_next_bar";
 }

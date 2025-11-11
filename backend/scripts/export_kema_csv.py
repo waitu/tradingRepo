@@ -129,6 +129,32 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Enable adaptive KEMA mid-band when supported by the Pine script",
     )
+    parser.add_argument(
+        "--lot-size",
+        type=float,
+        default=0.0001,
+        help="Lot size step for rounding calculated position quantities",
+    )
+    parser.add_argument(
+        "--execution-model",
+        choices=["close_signal_bar", "open_next_bar"],
+        default="close_signal_bar",
+        help="Choose execution price model: close of signal bar (default) or open of next bar",
+    )
+    round_group = parser.add_mutually_exclusive_group()
+    round_group.add_argument(
+        "--round-quantity",
+        dest="round_quantity",
+        action="store_true",
+        help="Round order quantities to the configured lot size (default)",
+    )
+    round_group.add_argument(
+        "--no-round-quantity",
+        dest="round_quantity",
+        action="store_false",
+        help="Disable quantity rounding even when a lot size is provided",
+    )
+    parser.set_defaults(round_quantity=True)
     return parser.parse_args()
 
 
@@ -342,6 +368,9 @@ def main() -> None:
         symbol=args.symbol,
         timeframe=args.timeframe,
         strategyRules=PineScriptStrategy(type="pine_script", code=pine_code),
+        lot_size=args.lot_size,
+        round_quantity=args.round_quantity,
+        execution_model=args.execution_model,
     )
 
     response = _run_kema_option(candles, strategy_config, request)

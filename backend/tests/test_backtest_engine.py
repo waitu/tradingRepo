@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine  # type: ignore[import]
@@ -6,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker  # type: ignore[import]
 from app.database import Base
 from app.models import PriceCandle
 from app.schemas import BacktestRequest, MovingAverageCrossStrategy, PineScriptStrategy
-from app.services.backtest_engine import run_backtest
+from app.services.backtest_engine import Position, _close_and_record_trade, run_backtest
 
 
 def _setup_session() -> Session:
@@ -28,6 +29,28 @@ def _seed_candles(db: Session) -> None:
             close=price,
             volume=1_000 + idx,
             symbol="BTCUSDT",
+            timeframe="1h",
+        )
+        db.add(candle)
+    db.commit()
+
+
+def _seed_candles_with_spread(db: Session, symbol: str) -> None:
+    start = datetime(2024, 1, 1)
+    prices = [100, 101, 102, 105, 104, 100, 98, 101, 103, 106]
+    for idx, price in enumerate(prices):
+        open_price = price - 0.6
+        close_price = price + 0.6
+        high_price = max(open_price, close_price) + 1.0
+        low_price = min(open_price, close_price) - 1.0
+        candle = PriceCandle(
+            timestamp=start + timedelta(hours=idx),
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
+            volume=1_500 + idx,
+            symbol=symbol,
             timeframe="1h",
         )
         db.add(candle)
@@ -173,3 +196,200 @@ def test_backtest_engine_kema_toggle_outputs_adaptive_indicator():
     assert any(
         candle.indicators.get("KEMA Adaptive") is not None for candle in annotated
     ), "Expected adaptive KEMA values in annotated candles"
+
+
+def test_round_quantity_enforces_lot_floor_for_spot():
+    db = _setup_session()
+    _seed_candles(db)
+
+    request = BacktestRequest(
+        initialCapital=1_000.0,
+        tradingFee=0.1,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        lot_size=0.5,
+        round_quantity=True,
+        strategyRules=MovingAverageCrossStrategy(
+            type="moving_average_cross",
+            fastWindow=2,
+            slowWindow=4,
+        ),
+    )
+
+    result = run_backtest(db, request)
+
+    assert result.executedTrades, "Expected at least one trade for rounding check"
+    assert math.isclose(result.lot_size, request.lot_size)
+    assert result.round_quantity is True
+    for trade in result.executedTrades:
+        remainder = math.fmod(trade.positionSize, request.lot_size)
+        assert math.isclose(remainder, 0.0, abs_tol=1e-8) or math.isclose(remainder, request.lot_size, abs_tol=1e-8)
+
+
+def test_round_quantity_disabled_preserves_fractional_size():
+    db = _setup_session()
+    _seed_candles(db)
+
+    request = BacktestRequest(
+        initialCapital=1_000.0,
+        tradingFee=0.1,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        lot_size=1.0,
+        round_quantity=False,
+        strategyRules=MovingAverageCrossStrategy(
+            type="moving_average_cross",
+            fastWindow=2,
+            slowWindow=4,
+        ),
+    )
+
+    result = run_backtest(db, request)
+
+    assert result.executedTrades, "Expected trades when rounding disabled"
+    assert math.isclose(result.lot_size, request.lot_size)
+    assert result.round_quantity is False
+    non_integer = [trade for trade in result.executedTrades if not math.isclose(trade.positionSize, round(trade.positionSize), abs_tol=1e-6)]
+    assert non_integer, "Expected at least one trade with fractional size when rounding is disabled"
+
+
+def test_round_quantity_skips_entries_below_lot():
+    db = _setup_session()
+    _seed_candles(db)
+
+    request = BacktestRequest(
+        initialCapital=1_000.0,
+        tradingFee=0.1,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        lot_size=10_000.0,
+        round_quantity=True,
+        strategyRules=MovingAverageCrossStrategy(
+            type="moving_average_cross",
+            fastWindow=2,
+            slowWindow=4,
+        ),
+    )
+
+    result = run_backtest(db, request)
+
+    assert result.numberOfTrades == 0
+    assert math.isclose(result.lot_size, request.lot_size)
+    assert result.round_quantity is True
+
+
+def test_round_quantity_applies_to_shorts():
+    db = _setup_session()
+    _seed_candles(db)
+
+    request = BacktestRequest(
+        initialCapital=1_000.0,
+        tradingFee=0.1,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        lot_size=1.0,
+        round_quantity=True,
+        strategyRules=MovingAverageCrossStrategy(
+            type="moving_average_cross",
+            fastWindow=2,
+            slowWindow=4,
+            allowShort=True,
+        ),
+    )
+
+    result = run_backtest(db, request)
+
+    short_trades = [trade for trade in result.executedTrades if trade.direction == "short"]
+    assert math.isclose(result.lot_size, request.lot_size)
+    assert result.round_quantity is True
+    assert short_trades, "Expected at least one short trade"
+    for trade in short_trades:
+        remainder = math.fmod(trade.positionSize, request.lot_size)
+        assert math.isclose(remainder, 0.0, abs_tol=1e-8) or math.isclose(remainder, request.lot_size, abs_tol=1e-8)
+
+
+def test_close_and_record_trade_marks_breakeven_when_profit_zero():
+    trades = []
+    position = Position(
+        entry_time=datetime(2024, 1, 1),
+        entry_price=100.0,
+        quantity=1.0,
+        direction=1,
+        entry_fee=0.0,
+        entry_signal="Test entry",
+    )
+
+    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+        position,
+        price=100.0,
+        fee_rate=0.0,
+        timestamp=datetime(2024, 1, 2),
+        exit_signal="Test exit",
+        trades=trades,
+        cash=0.0,
+        wins=0,
+        losses=0,
+        breakevens=0,
+        cumulative_profit=0.0,
+    )
+
+    assert math.isclose(cash, 100.0)
+    assert wins == 0
+    assert losses == 0
+    assert breakevens == 1
+    assert math.isclose(cumulative_profit, 0.0)
+    assert trades and math.isclose(trades[0].profit, 0.0)
+
+
+def test_execution_model_controls_execution_price():
+    db = _setup_session()
+    symbol = "SPREAD"
+    _seed_candles_with_spread(db, symbol)
+
+    base_request = dict(
+        initialCapital=1_000.0,
+        tradingFee=0.1,
+        symbol=symbol,
+        timeframe="1h",
+        strategyRules=MovingAverageCrossStrategy(
+            type="moving_average_cross",
+            fastWindow=2,
+            slowWindow=4,
+            allowShort=True,
+        ),
+    )
+
+    close_result = run_backtest(
+        db,
+        BacktestRequest(**base_request, execution_model="close_signal_bar"),
+    )
+    open_result = run_backtest(
+        db,
+        BacktestRequest(**base_request, execution_model="open_next_bar"),
+    )
+
+    assert close_result.execution_model == "close_signal_bar"
+    assert open_result.execution_model == "open_next_bar"
+    assert close_result.executedTrades, "Expected trades for execution model comparison"
+    assert len(close_result.executedTrades) == len(open_result.executedTrades)
+
+    close_lookup = {candle.timestamp: candle for candle in close_result.annotatedCandles}
+    open_lookup = {candle.timestamp: candle for candle in open_result.annotatedCandles}
+
+    for trade in close_result.executedTrades:
+        assert trade.entryTime in close_lookup
+        entry_candle = close_lookup[trade.entryTime]
+        assert math.isclose(trade.entryPrice, entry_candle.close, rel_tol=1e-9, abs_tol=1e-9)
+        if trade.exitSignal != "Final bar exit":
+            assert trade.exitTime in close_lookup
+            exit_candle = close_lookup[trade.exitTime]
+            assert math.isclose(trade.exitPrice, exit_candle.close, rel_tol=1e-9, abs_tol=1e-9)
+
+    for trade in open_result.executedTrades:
+        assert trade.entryTime in open_lookup
+        entry_candle = open_lookup[trade.entryTime]
+        assert math.isclose(trade.entryPrice, entry_candle.open, rel_tol=1e-9, abs_tol=1e-9)
+        if trade.exitSignal != "Final bar exit":
+            assert trade.exitTime in open_lookup
+            exit_candle = open_lookup[trade.exitTime]
+            assert math.isclose(trade.exitPrice, exit_candle.open, rel_tol=1e-9, abs_tol=1e-9)

@@ -3,7 +3,7 @@ import { isAxiosError } from "axios";
 import toast, { Toaster } from "react-hot-toast";
 
 import api from "../api/client";
-import CandlestickChart from "../components/CandlestickChart";
+import CandlestickChart, { indicatorPalette } from "../components/CandlestickChart";
 import EquityCurveChart from "../components/EquityCurveChart";
 import MetricsPanel from "../components/MetricsPanel";
 import TradeHistoryTable from "../components/TradeHistoryTable";
@@ -19,6 +19,14 @@ import {
 } from "../api/types";
 
 const timeframeOptions = ["1h", "4h", "1d"];
+
+const indicatorTogglePriority = ["EMA", "KEMA Adaptive", "Upper Band", "Lower Band"];
+
+const indicatorDisplayLabels: Record<string, string> = {
+  "KEMA Adaptive": "KEMA (Adaptive)",
+  "Upper Band": "Upper Band",
+  "Lower Band": "Lower Band",
+};
 
 const kemaOptionTemplate = `//@version=5
 strategy("KEMA True Adaptive Strategy", overlay=true, margin_long=100, margin_short=100)
@@ -273,6 +281,11 @@ const BacktestTradingPage = () => {
   const [selectedTimeframe, setSelectedTimeframe] = useState<string>(timeframeOptions[0]);
   const [initialCapital, setInitialCapital] = useState<number>(10000);
   const [tradingFee, setTradingFee] = useState<number>(0.1);
+  const [lotSize, setLotSize] = useState<number>(0.0001);
+  const [roundQuantity, setRoundQuantity] = useState<boolean>(true);
+  const [executionModel, setExecutionModel] = useState<"close_signal_bar" | "open_next_bar">(
+    "close_signal_bar",
+  );
   const [startTime, setStartTime] = useState<string>("");
   const [endTime, setEndTime] = useState<string>("");
   const [strategyType, setStrategyType] = useState<StrategyType>(() => {
@@ -322,6 +335,7 @@ const BacktestTradingPage = () => {
   const [chartFocusRequest, setChartFocusRequest] = useState<{ time: string; requestId: number } | null>(null);
   const [rangePreset, setRangePreset] = useState<RangePreset>("all");
   const [customRange, setCustomRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
+  const [indicatorVisibility, setIndicatorVisibility] = useState<Record<string, boolean>>({});
 
   const selectedDataset = useMemo(
     () =>
@@ -399,6 +413,68 @@ const BacktestTradingPage = () => {
     return `${startLabel} – ${endLabel}`;
   }, [formatDateTime, selectedDataset]);
 
+  useEffect(() => {
+    const lines = backtestResult?.indicatorLines;
+    if (!lines || Object.keys(lines).length === 0) {
+      setIndicatorVisibility((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+      return;
+    }
+
+    setIndicatorVisibility((prev) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+
+      Object.keys(lines).forEach((name) => {
+        if (Object.prototype.hasOwnProperty.call(prev, name)) {
+          next[name] = prev[name];
+        } else {
+          next[name] = true;
+          changed = true;
+        }
+      });
+
+      if (Object.keys(prev).some((name) => !Object.prototype.hasOwnProperty.call(lines, name))) {
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [backtestResult?.indicatorLines]);
+
+  const filteredIndicatorLines = useMemo(() => {
+    const lines = backtestResult?.indicatorLines ?? {};
+    return Object.fromEntries(
+      Object.entries(lines).filter(([name]) => indicatorVisibility[name] !== false),
+    ) as BacktestResponse["indicatorLines"];
+  }, [backtestResult?.indicatorLines, indicatorVisibility]);
+  const availableIndicatorNames = useMemo(() => {
+    const lines = backtestResult?.indicatorLines;
+    if (!lines) {
+      return [] as string[];
+    }
+    return Object.keys(lines).filter((name) => (lines[name]?.length ?? 0) > 0);
+  }, [backtestResult?.indicatorLines]);
+
+  const orderedIndicatorNames = useMemo(() => {
+    if (availableIndicatorNames.length === 0) {
+      return [] as string[];
+    }
+    const prioritized = indicatorTogglePriority.filter((name) => availableIndicatorNames.includes(name));
+    const extras = availableIndicatorNames.filter((name) => !indicatorTogglePriority.includes(name));
+    return [...prioritized, ...extras];
+  }, [availableIndicatorNames]);
+
+  const indicatorColorMap = useMemo(() => {
+    const lines = backtestResult?.indicatorLines ?? {};
+    const map: Record<string, string> = {};
+    Object.keys(lines).forEach((name, index) => {
+      map[name] = indicatorPalette[index % indicatorPalette.length];
+    });
+    return map;
+  }, [backtestResult?.indicatorLines]);
+
+  const indicatorControlsVisible = orderedIndicatorNames.length > 0;
+
   const formatPrice = useCallback((value: number) => {
     return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }, []);
@@ -421,6 +497,52 @@ const BacktestTradingPage = () => {
     }
     return value.toLocaleString();
   }, []);
+
+  const runConfigDetails = useMemo(
+    () =>
+      !backtestResult
+        ? []
+        : [
+            {
+              key: "initial-capital",
+              label: "Initial Capital",
+              value: formatPrice(initialCapital),
+            },
+            {
+              key: "trading-fee",
+              label: "Trading Fee",
+              value: `${Number.isFinite(tradingFee) ? tradingFee.toFixed(2) : "0.00"}%`,
+            },
+            {
+              key: "lot-size",
+              label: "Lot Size",
+              value: formatPositionSize(lotSize),
+            },
+            {
+              key: "round-quantity",
+              label: "Round Quantity",
+              value: roundQuantity ? "Enabled" : "Disabled",
+            },
+            {
+              key: "execution-model",
+              label: "Execution Model",
+              value:
+                (backtestResult.execution_model ?? executionModel) === "close_signal_bar"
+                  ? "Close of signal bar"
+                  : "Open of next bar",
+            },
+          ],
+    [
+      backtestResult,
+      executionModel,
+      formatPositionSize,
+      formatPrice,
+      initialCapital,
+      lotSize,
+      roundQuantity,
+      tradingFee,
+    ],
+  );
 
   const findCandleByTime = useCallback(
     (time: string): PriceCandle | null => {
@@ -770,12 +892,17 @@ const BacktestTradingPage = () => {
       toast.error("Select a dataset before running backtest");
       return undefined;
     }
+    const normalizedLotSize = Number.isFinite(lotSize) && lotSize >= 0 ? lotSize : 0.0001;
+    const normalizedRoundQuantity = Boolean(roundQuantity);
     const payload: BacktestRequestPayload = {
       initialCapital,
       tradingFee,
       symbol: selectedSymbol,
       timeframe: selectedTimeframe,
       strategyRules,
+      lot_size: normalizedLotSize,
+      round_quantity: normalizedRoundQuantity,
+      execution_model: executionModel,
     };
     if (startTime) {
       payload.startTime = new Date(startTime).toISOString();
@@ -794,6 +921,15 @@ const BacktestTradingPage = () => {
       const { data } = await api.post<BacktestResponse>("/backtest/run", payload);
       setBacktestResult(data);
       setExecutedTrades(data.executedTrades);
+      if (typeof data.lot_size === "number" && Number.isFinite(data.lot_size)) {
+        setLotSize(data.lot_size);
+      }
+      if (typeof data.round_quantity === "boolean") {
+        setRoundQuantity(data.round_quantity);
+      }
+      if (data.execution_model === "close_signal_bar" || data.execution_model === "open_next_bar") {
+        setExecutionModel(data.execution_model);
+      }
       toast.success("Backtest completed");
     } catch (error: unknown) {
       const message =
@@ -805,6 +941,13 @@ const BacktestTradingPage = () => {
       setIsRunning(false);
     }
   };
+
+  const handleIndicatorToggle = useCallback(
+    (name: string, checked: boolean) => {
+      setIndicatorVisibility((prev) => ({ ...prev, [name]: checked }));
+    },
+    [setIndicatorVisibility],
+  );
 
   const applyJsonEditor = () => {
     try {
@@ -1198,6 +1341,42 @@ const BacktestTradingPage = () => {
                   }
                 />
 
+                <label htmlFor="lot-size">Lot Size</label>
+                <input
+                  id="lot-size"
+                  type="number"
+                  min="0"
+                  step="0.0001"
+                  value={lotSize}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setLotSize(Number(event.target.value))
+                  }
+                />
+                <p className="panel-hint">Set to 0 to disable lot rounding.</p>
+
+                <label className="panel-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={roundQuantity}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setRoundQuantity(event.target.checked)
+                    }
+                  />
+                  <span>Round quantity to lot size</span>
+                </label>
+
+                <label htmlFor="execution-model">Execution Model</label>
+                <select
+                  id="execution-model"
+                  value={executionModel}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    setExecutionModel(event.target.value as "close_signal_bar" | "open_next_bar")
+                  }
+                >
+                  <option value="close_signal_bar">Close of signal bar (TradingView)</option>
+                  <option value="open_next_bar">Open of next bar (realistic)</option>
+                </select>
+
                 <div className="date-range">
                   <div className="date-range-header">
                     <span>Date Range</span>
@@ -1319,7 +1498,7 @@ const BacktestTradingPage = () => {
                 <div className="strategy-presets">
                   <div className="preset-label">Templates</div>
                   <button
-                    type="button"
+                    type="button" 
                     className="secondary-button"
                     onClick={() => {
                       setStrategyType("pine_script");
@@ -1353,13 +1532,40 @@ const BacktestTradingPage = () => {
         <main className="main-panel">
           <section className="chart-card">
             <div className="card-header">
-              <h2>{selectedSymbol ? `${selectedSymbol} · ${selectedTimeframe}` : "Price Chart"}</h2>
-              <span>{candles.length} candles loaded</span>
+              <div className="card-heading">
+                <h2>{selectedSymbol ? `${selectedSymbol} · ${selectedTimeframe}` : "Price Chart"}</h2>
+                <span>{candles.length} candles loaded</span>
+              </div>
+              {indicatorControlsVisible && (
+                <div className="indicator-toggle-group" role="group" aria-label="Indicator overlays">
+                  {orderedIndicatorNames.map((name) => {
+                    const checked = indicatorVisibility[name] ?? true;
+                    const label = indicatorDisplayLabels[name] ?? name;
+                    const swatchColor = indicatorColorMap[name] ?? indicatorPalette[0];
+                    return (
+                      <label key={name} className="indicator-toggle" title={name}>
+                        <span
+                          className="indicator-color"
+                          style={{ backgroundColor: swatchColor }}
+                          aria-hidden="true"
+                        />
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => handleIndicatorToggle(name, event.target.checked)}
+                        />
+                        <span className="indicator-label">{label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
             </div>
             <CandlestickChart
               candles={candles}
               trades={executedTrades}
-              indicatorLines={backtestResult?.indicatorLines ?? {}}
+              indicatorLines={filteredIndicatorLines}
+              indicatorColors={indicatorColorMap}
               focusRequest={chartFocusRequest}
               onFocusHandled={clearChartFocusRequest}
               onHoverCandle={setHoverCandle}
@@ -1444,6 +1650,31 @@ const BacktestTradingPage = () => {
               );
             })()}
           </section>
+
+          {backtestResult && runConfigDetails.length > 0 && (
+            <section className="config-card">
+              <div className="card-header">
+                <h3>Run Configuration</h3>
+                <span>
+                  {(backtestResult?.round_quantity ?? roundQuantity)
+                    ? "Lot rounding on"
+                    : "Lot rounding off"}
+                  {" · "}
+                  {(backtestResult?.execution_model ?? executionModel) === "close_signal_bar"
+                    ? "Exec @ close"
+                    : "Exec @ next open"}
+                </span>
+              </div>
+              <div className="config-grid">
+                {runConfigDetails.map(({ key, label, value }) => (
+                  <div key={key} className="config-item">
+                    <span className="label">{label}</span>
+                    <span className="value">{value}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           {showAnalytics && <MetricsPanel metrics={backtestResult} />}
 

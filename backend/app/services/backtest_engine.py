@@ -108,12 +108,37 @@ def _quantize_contracts(quantity: float) -> float:
     return math.floor(quantity * 10000) / 10000.0
 
 
+def _apply_lot_rounding(quantity: float, lot_size: Optional[float], enabled: bool) -> float:
+    if not enabled or lot_size is None or lot_size <= 0:
+        return quantity
+    if quantity <= 0 or not math.isfinite(quantity):
+        return 0.0
+    ratio = quantity / lot_size
+    if not math.isfinite(ratio) or ratio <= 0:
+        return 0.0
+    rounded_steps = math.floor(ratio + 1e-12)
+    if rounded_steps <= 0:
+        return 0.0
+    rounded_quantity = rounded_steps * lot_size
+    if rounded_quantity <= 0:
+        return 0.0
+    return rounded_quantity
+
+
+def _resolve_execution_price(candle: PriceCandle, execution_model: str) -> float:
+    if execution_model == "close_signal_bar":
+        return candle.close
+    return candle.open
+
+
 def _compute_contracts(
     strategy: KemaOptionConfig,
     equity: float,
     channel_delta: Optional[float],
     atr_value: Optional[float],
     price: float,
+    lot_size: float,
+    round_quantity: bool,
 ) -> float:
     if price <= 0 or equity <= 0:
         return 0.0
@@ -132,12 +157,23 @@ def _compute_contracts(
 
     quantity = min(qty_from_delta, qty_from_atr, qty_from_equity)
     if not math.isfinite(quantity):
-        return 0.0001
+        return 0.0
     quantity = max(quantity, 0.0)
-    quantized = _quantize_contracts(quantity)
-    if quantized <= 0:
-        return 0.0001
-    return max(quantized, 0.0001)
+    if quantity <= 0:
+        return 0.0
+
+    if round_quantity:
+        quantity = _apply_lot_rounding(quantity, lot_size, True)
+    else:
+        quantity = _quantize_contracts(quantity)
+
+    if quantity <= 0:
+        return 0.0
+    if round_quantity and lot_size > 0 and quantity < lot_size:
+        return 0.0
+    if not round_quantity:
+        return max(quantity, 0.0001)
+    return quantity
 
 
 def _close_position(
@@ -179,8 +215,9 @@ def _close_and_record_trade(
     cash: float,
     wins: int,
     losses: int,
+    breakevens: int,
     cumulative_profit: float,
-) -> Tuple[float, int, int, float]:
+) -> Tuple[float, int, int, int, float]:
     cash_delta, profit, exit_fee, direction_label = _close_position(position, price, fee_rate)
     cash += cash_delta
 
@@ -206,12 +243,14 @@ def _close_and_record_trade(
         )
     )
 
-    if profit >= 0:
+    if profit > 0:
         wins += 1
-    else:
+    elif profit < 0:
         losses += 1
+    else:
+        breakevens += 1
 
-    return cash, wins, losses, cumulative_profit
+    return cash, wins, losses, breakevens, cumulative_profit
 
 
 def _current_equity(cash: float, position: Optional[Position], price: float) -> float:
@@ -241,7 +280,128 @@ def _run_ma_cross(
     max_drawdown = 0.0
     wins = 0
     losses = 0
+    breakevens = 0
     cumulative_profit = 0.0
+
+    immediate_fill = req.execution_model == "close_signal_bar"
+
+    def _enter_long_now(desired_contracts: float, entry_signal: str, execution_price: float, timestamp: datetime) -> bool:
+        nonlocal cash, position
+        if execution_price <= 0 or desired_contracts <= 0 or cash <= 0:
+            return False
+        affordable = cash / execution_price if execution_price > 0 else 0.0
+        quantity = min(desired_contracts, affordable)
+        if req.round_quantity:
+            quantity = _apply_lot_rounding(quantity, req.lot_size, True)
+        if quantity <= 0:
+            return False
+        entry_cost = quantity * execution_price
+        entry_fee = entry_cost * fee_rate
+        total_cost = entry_cost + entry_fee
+        if total_cost > cash:
+            return False
+        cash -= total_cost
+        position = Position(
+            entry_time=timestamp,
+            entry_price=execution_price,
+            quantity=quantity,
+            direction=1,
+            entry_fee=entry_fee,
+            entry_signal=entry_signal,
+        )
+        return True
+
+    def _enter_short_now(desired_contracts: float, entry_signal: str, execution_price: float, timestamp: datetime) -> bool:
+        nonlocal cash, position
+        if execution_price <= 0 or desired_contracts <= 0:
+            return False
+        quantity = desired_contracts
+        if req.round_quantity:
+            quantity = _apply_lot_rounding(quantity, req.lot_size, True)
+        notional = quantity * execution_price
+        if quantity <= 0 or notional <= 0:
+            return False
+        entry_fee = notional * fee_rate
+        if cash < entry_fee:
+            return False
+        cash -= entry_fee
+        cash += notional
+        position = Position(
+            entry_time=timestamp,
+            entry_price=execution_price,
+            quantity=quantity,
+            direction=-1,
+            entry_fee=entry_fee,
+            entry_signal=entry_signal,
+        )
+        return True
+
+    immediate_fill = req.execution_model == "close_signal_bar"
+
+    def _enter_long(execution_price: float, entry_signal: str, timestamp: datetime) -> bool:
+        nonlocal cash, position
+        if execution_price <= 0 or cash <= 0:
+            return False
+        original_cash = cash
+        entry_fee = cash * fee_rate
+        cash -= entry_fee
+        if cash <= 0:
+            cash = original_cash
+            return False
+        raw_quantity = cash / execution_price
+        quantity = (
+            _apply_lot_rounding(raw_quantity, req.lot_size, True)
+            if req.round_quantity
+            else raw_quantity
+        )
+        if quantity <= 0:
+            cash = original_cash
+            return False
+        entry_cost = quantity * execution_price
+        if entry_cost > cash + 1e-12:
+            cash = original_cash
+            return False
+        cash -= entry_cost
+        position = Position(
+            entry_time=timestamp,
+            entry_price=execution_price,
+            quantity=quantity,
+            direction=1,
+            entry_fee=entry_fee,
+            entry_signal=entry_signal,
+        )
+        return True
+
+    def _enter_short(execution_price: float, entry_signal: str, timestamp: datetime) -> bool:
+        nonlocal cash, position
+        if execution_price <= 0 or cash <= 0:
+            return False
+        original_cash = cash
+        entry_fee = cash * fee_rate
+        cash -= entry_fee
+        raw_quantity = original_cash / execution_price if execution_price > 0 else 0.0
+        quantity = (
+            _apply_lot_rounding(raw_quantity, req.lot_size, True)
+            if req.round_quantity
+            else raw_quantity
+        )
+        if quantity <= 0:
+            cash = original_cash
+            return False
+        notional = quantity * execution_price
+        if notional <= 0:
+            cash = original_cash
+            return False
+        cash += notional
+        position = Position(
+            entry_time=timestamp,
+            entry_price=execution_price,
+            quantity=quantity,
+            direction=-1,
+            entry_fee=entry_fee,
+            entry_signal=entry_signal,
+        )
+        return True
 
     pending_entry_direction: Optional[int] = None
     pending_entry_signal: Optional[str] = None
@@ -259,75 +419,40 @@ def _run_ma_cross(
 
     for candle in candles:
         price = getattr(candle, strategy.source)
-        execution_price = candle.open
+        execution_price = _resolve_execution_price(candle, req.execution_model)
         high = candle.high
         low = candle.low
 
-        if pending_exit_direction is not None and position is not None:
-            if position.direction == pending_exit_direction:
-                cash, wins, losses, cumulative_profit = _close_and_record_trade(
-                    position,
-                    execution_price,
-                    fee_rate,
-                    candle.timestamp,
-                    pending_exit_signal or "Exit signal",
-                    trades,
-                    cash,
-                    wins,
-                    losses,
-                    cumulative_profit,
-                )
-                position = None
-            pending_exit_direction = None
-            pending_exit_signal = None
-
-        if pending_entry_direction is not None and position is None and execution_price > 0:
-            entry_signal = pending_entry_signal or (
-                "Fast MA crossover" if pending_entry_direction == 1 else "Fast MA crossunder"
-            )
-            if pending_entry_direction == 1:
-                if cash > 0:
-                    original_cash = cash
-                    entry_fee = cash * fee_rate
-                    cash -= entry_fee
-                    if cash > 0:
-                        quantity = cash / execution_price
-                        if quantity > 0:
-                            cash -= quantity * execution_price
-                            position = Position(
-                                entry_time=candle.timestamp,
-                                entry_price=execution_price,
-                                quantity=quantity,
-                                direction=1,
-                                entry_fee=entry_fee,
-                                entry_signal=entry_signal,
-                            )
-                        else:
-                            cash = original_cash
-                    else:
-                        cash = original_cash
-            elif pending_entry_direction == -1 and strategy.allowShort and cash > 0:
-                original_cash = cash
-                entry_fee = cash * fee_rate
-                cash -= entry_fee
-                if execution_price > 0:
-                    quantity = original_cash / execution_price
-                else:
-                    quantity = 0.0
-                if cash > 0 and quantity > 0:
-                    cash += original_cash
-                    position = Position(
-                        entry_time=candle.timestamp,
-                        entry_price=execution_price,
-                        quantity=quantity,
-                        direction=-1,
-                        entry_fee=entry_fee,
-                        entry_signal=entry_signal,
+        if not immediate_fill:
+            if pending_exit_direction is not None and position is not None:
+                if position.direction == pending_exit_direction:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        execution_price,
+                        fee_rate,
+                        candle.timestamp,
+                        pending_exit_signal or "Exit signal",
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
                     )
-                else:
-                    cash = original_cash
-            pending_entry_direction = None
-            pending_entry_signal = None
+                    position = None
+                pending_exit_direction = None
+                pending_exit_signal = None
+
+            if pending_entry_direction is not None and position is None and execution_price > 0:
+                entry_signal = pending_entry_signal or (
+                    "Fast MA crossover" if pending_entry_direction == 1 else "Fast MA crossunder"
+                )
+                if pending_entry_direction == 1:
+                    _enter_long(execution_price, entry_signal, candle.timestamp)
+                elif pending_entry_direction == -1 and strategy.allowShort:
+                    _enter_short(execution_price, entry_signal, candle.timestamp)
+                pending_entry_direction = None
+                pending_entry_signal = None
 
         fast_history.append(price)
         slow_history.append(price)
@@ -361,24 +486,65 @@ def _run_ma_cross(
             prev_slow_ma = slow_ma
 
         if signal_buy:
-            if position is None:
-                pending_entry_direction = 1
-                pending_entry_signal = entry_signal_text
-            elif position.direction == -1:
-                pending_exit_direction = -1
-                pending_exit_signal = entry_signal_text
-                pending_entry_direction = 1
-                pending_entry_signal = entry_signal_text
+            if immediate_fill:
+                if position is None:
+                    _enter_long(candle.close, entry_signal_text, candle.timestamp)
+                elif position.direction == -1:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        candle.close,
+                        fee_rate,
+                        candle.timestamp,
+                        entry_signal_text,
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+                    _enter_long(candle.close, entry_signal_text, candle.timestamp)
+            else:
+                if position is None:
+                    pending_entry_direction = 1
+                    pending_entry_signal = entry_signal_text
+                elif position.direction == -1:
+                    pending_exit_direction = -1
+                    pending_exit_signal = entry_signal_text
+                    pending_entry_direction = 1
+                    pending_entry_signal = entry_signal_text
         elif signal_sell:
-            if position is not None and position.direction == 1:
-                pending_exit_direction = 1
-                pending_exit_signal = exit_signal_text
-                if strategy.allowShort:
+            if immediate_fill:
+                if position is not None and position.direction == 1:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        candle.close,
+                        fee_rate,
+                        candle.timestamp,
+                        exit_signal_text,
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+                    if strategy.allowShort:
+                        _enter_short(candle.close, exit_signal_text, candle.timestamp)
+                elif position is None and strategy.allowShort:
+                    _enter_short(candle.close, exit_signal_text, candle.timestamp)
+            else:
+                if position is not None and position.direction == 1:
+                    pending_exit_direction = 1
+                    pending_exit_signal = exit_signal_text
+                    if strategy.allowShort:
+                        pending_entry_direction = -1
+                        pending_entry_signal = exit_signal_text
+                elif position is None and strategy.allowShort:
                     pending_entry_direction = -1
                     pending_entry_signal = exit_signal_text
-            elif position is None and strategy.allowShort:
-                pending_entry_direction = -1
-                pending_entry_signal = exit_signal_text
 
         if position is not None:
             if position.direction == 1:
@@ -412,7 +578,7 @@ def _run_ma_cross(
 
     if position is not None:
         last_price = getattr(candles[-1], strategy.source)
-        cash, wins, losses, cumulative_profit = _close_and_record_trade(
+        cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
             position,
             last_price,
             fee_rate,
@@ -422,6 +588,7 @@ def _run_ma_cross(
             cash,
             wins,
             losses,
+            breakevens,
             cumulative_profit,
         )
         position = None
@@ -432,7 +599,8 @@ def _run_ma_cross(
     total_profit = equity_curve[-1].equity - req.initialCapital if equity_curve else 0.0
     roi_percent = (total_profit / req.initialCapital * 100) if req.initialCapital else 0.0
     total_trades = len(trades)
-    winrate = (wins / total_trades * 100) if total_trades else 0.0
+    effective_trades = total_trades - breakevens
+    winrate = (wins / effective_trades * 100) if effective_trades > 0 else 0.0
 
     return BacktestResponse(
         totalProfit=round(total_profit, 2),
@@ -448,6 +616,10 @@ def _run_ma_cross(
             if points
         },
         annotatedCandles=annotated_candles,
+        lot_size=req.lot_size,
+        round_quantity=req.round_quantity,
+        execution_model=req.execution_model,
+        breakevenTrades=breakevens,
     )
 
 
@@ -466,7 +638,65 @@ def _run_kema_option(
     max_drawdown = 0.0
     wins = 0
     losses = 0
+    breakevens = 0
     cumulative_profit = 0.0
+
+    immediate_fill = req.execution_model == "close_signal_bar"
+
+    def _enter_long_now(
+        desired_contracts: float, entry_signal: str, execution_price: float, timestamp: datetime
+    ) -> bool:
+        nonlocal cash, position
+        if execution_price <= 0 or desired_contracts <= 0 or cash <= 0:
+            return False
+        affordable = cash / execution_price if execution_price > 0 else 0.0
+        quantity = min(desired_contracts, affordable)
+        if req.round_quantity:
+            quantity = _apply_lot_rounding(quantity, req.lot_size, True)
+        if quantity <= 0:
+            return False
+        entry_cost = quantity * execution_price
+        entry_fee = entry_cost * fee_rate
+        total_cost = entry_cost + entry_fee
+        if total_cost > cash + 1e-12:
+            return False
+        cash -= total_cost
+        position = Position(
+            entry_time=timestamp,
+            entry_price=execution_price,
+            quantity=quantity,
+            direction=1,
+            entry_fee=entry_fee,
+            entry_signal=entry_signal,
+        )
+        return True
+
+    def _enter_short_now(
+        desired_contracts: float, entry_signal: str, execution_price: float, timestamp: datetime
+    ) -> bool:
+        nonlocal cash, position
+        if execution_price <= 0 or desired_contracts <= 0:
+            return False
+        quantity = desired_contracts
+        if req.round_quantity:
+            quantity = _apply_lot_rounding(quantity, req.lot_size, True)
+        notional = quantity * execution_price
+        if quantity <= 0 or notional <= 0:
+            return False
+        entry_fee = notional * fee_rate
+        if cash < entry_fee:
+            return False
+        cash -= entry_fee
+        cash += notional
+        position = Position(
+            entry_time=timestamp,
+            entry_price=execution_price,
+            quantity=quantity,
+            direction=-1,
+            entry_fee=entry_fee,
+            entry_signal=entry_signal,
+        )
+        return True
 
     pending_entry_direction: Optional[int] = None
     pending_entry_contracts: float = 0.0
@@ -501,7 +731,7 @@ def _run_kema_option(
         high = candle.high
         low = candle.low
         timestamp = candle.timestamp
-        execution_price = candle.open
+        execution_price = _resolve_execution_price(candle, req.execution_model)
 
         bar_in_window = True
         if strategy.start_date and timestamp < strategy.start_date:
@@ -509,69 +739,76 @@ def _run_kema_option(
         if strategy.end_date and timestamp > strategy.end_date:
             bar_in_window = False
 
-        if pending_exit_direction is not None:
-            if position is not None and position.direction == pending_exit_direction:
-                exit_price = execution_price if execution_price > 0 else price
-                cash, wins, losses, cumulative_profit = _close_and_record_trade(
-                    position,
-                    exit_price,
-                    fee_rate,
-                    timestamp,
-                    pending_exit_signal or "Exit signal",
-                    trades,
-                    cash,
-                    wins,
-                    losses,
-                    cumulative_profit,
-                )
-                position = None
-            pending_exit_direction = None
-            pending_exit_signal = None
+        if not immediate_fill:
+            if pending_exit_direction is not None:
+                if position is not None and position.direction == pending_exit_direction:
+                    exit_price = execution_price if execution_price > 0 else price
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        exit_price,
+                        fee_rate,
+                        timestamp,
+                        pending_exit_signal or "Exit signal",
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+                pending_exit_direction = None
+                pending_exit_signal = None
 
-        if (
-            pending_entry_direction is not None
-            and position is None
-            and pending_entry_contracts > 0
-            and execution_price > 0
-            and pending_entry_in_window
-            and bar_in_window
-        ):
-            if pending_entry_direction == 1 and strategy.trade_option in {"long_only", "both"}:
-                affordable = cash / execution_price if execution_price > 0 else 0.0
-                quantity = min(pending_entry_contracts, affordable)
-                if quantity > 0:
-                    entry_cost = quantity * execution_price
-                    entry_fee = entry_cost * fee_rate
-                    total_cost = entry_cost + entry_fee
-                    if total_cost <= cash:
-                        cash -= total_cost
-                        position = Position(
-                            entry_time=timestamp,
-                            entry_price=execution_price,
-                            quantity=quantity,
-                            direction=1,
-                            entry_fee=entry_fee,
-                            entry_signal=pending_entry_signal or "Upper band breakout",
-                        )
-            elif pending_entry_direction == -1 and strategy.trade_option in {"short_only", "both"}:
-                notional = pending_entry_contracts * execution_price
-                if notional > 0:
-                    entry_fee = notional * fee_rate
-                    if cash >= entry_fee:
-                        cash -= entry_fee
-                        cash += notional
-                        position = Position(
-                            entry_time=timestamp,
-                            entry_price=execution_price,
-                            quantity=pending_entry_contracts,
-                            direction=-1,
-                            entry_fee=entry_fee,
-                            entry_signal=pending_entry_signal or "Lower band breakdown",
-                        )
-            pending_entry_direction = None
-            pending_entry_contracts = 0.0
-            pending_entry_signal = None
-            pending_entry_in_window = True
+            if (
+                pending_entry_direction is not None
+                and position is None
+                and pending_entry_contracts > 0
+                and execution_price > 0
+                and pending_entry_in_window
+                and bar_in_window
+            ):
+                if pending_entry_direction == 1 and strategy.trade_option in {"long_only", "both"}:
+                    affordable = cash / execution_price if execution_price > 0 else 0.0
+                    quantity = min(pending_entry_contracts, affordable)
+                    if req.round_quantity:
+                        quantity = _apply_lot_rounding(quantity, req.lot_size, True)
+                    if quantity > 0:
+                        entry_cost = quantity * execution_price
+                        entry_fee = entry_cost * fee_rate
+                        total_cost = entry_cost + entry_fee
+                        if total_cost <= cash:
+                            cash -= total_cost
+                            position = Position(
+                                entry_time=timestamp,
+                                entry_price=execution_price,
+                                quantity=quantity,
+                                direction=1,
+                                entry_fee=entry_fee,
+                                entry_signal=pending_entry_signal or "Upper band breakout",
+                            )
+                elif pending_entry_direction == -1 and strategy.trade_option in {"short_only", "both"}:
+                    quantity = pending_entry_contracts
+                    if req.round_quantity:
+                        quantity = _apply_lot_rounding(quantity, req.lot_size, True)
+                    notional = quantity * execution_price
+                    if quantity > 0 and notional > 0:
+                        entry_fee = notional * fee_rate
+                        if cash >= entry_fee:
+                            cash -= entry_fee
+                            cash += notional
+                            position = Position(
+                                entry_time=timestamp,
+                                entry_price=execution_price,
+                                quantity=quantity,
+                                direction=-1,
+                                entry_fee=entry_fee,
+                                entry_signal=pending_entry_signal or "Lower band breakdown",
+                            )
+                pending_entry_direction = None
+                pending_entry_contracts = 0.0
+                pending_entry_signal = None
+                pending_entry_in_window = True
 
         if (
             position is not None
@@ -579,7 +816,7 @@ def _run_kema_option(
             and prev_time is not None
             and prev_time <= strategy.end_date < timestamp
         ):
-            cash, wins, losses, cumulative_profit = _close_and_record_trade(
+            cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
                 position,
                 price,
                 fee_rate,
@@ -589,6 +826,7 @@ def _run_kema_option(
                 cash,
                 wins,
                 losses,
+                breakevens,
                 cumulative_profit,
             )
             position = None
@@ -702,19 +940,81 @@ def _run_kema_option(
             and strategy.trade_option in {"short_only", "both"}
         )
 
-        if position is not None and pending_exit_direction is None:
-            if long_exit and position.direction == 1:
-                pending_exit_direction = 1
-                pending_exit_signal = "Price crossed below lower band"
-            elif short_exit and position.direction == -1:
-                pending_exit_direction = -1
-                pending_exit_signal = "Price crossed above upper band"
-            elif long_entry and position.direction == -1:
-                pending_exit_direction = -1
-                pending_exit_signal = "Price crossed above upper band"
-            elif short_entry and position.direction == 1:
-                pending_exit_direction = 1
-                pending_exit_signal = "Price crossed below lower band"
+        if position is not None:
+            if immediate_fill:
+                if long_exit and position.direction == 1:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        candle.close,
+                        fee_rate,
+                        timestamp,
+                        "Price crossed below lower band",
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+                if short_exit and position is not None and position.direction == -1:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        candle.close,
+                        fee_rate,
+                        timestamp,
+                        "Price crossed above upper band",
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+                if long_entry and position is not None and position.direction == -1:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        candle.close,
+                        fee_rate,
+                        timestamp,
+                        "Price crossed above upper band",
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+                if short_entry and position is not None and position.direction == 1:
+                    cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
+                        position,
+                        candle.close,
+                        fee_rate,
+                        timestamp,
+                        "Price crossed below lower band",
+                        trades,
+                        cash,
+                        wins,
+                        losses,
+                        breakevens,
+                        cumulative_profit,
+                    )
+                    position = None
+            elif pending_exit_direction is None:
+                if long_exit and position.direction == 1:
+                    pending_exit_direction = 1
+                    pending_exit_signal = "Price crossed below lower band"
+                elif short_exit and position.direction == -1:
+                    pending_exit_direction = -1
+                    pending_exit_signal = "Price crossed above upper band"
+                elif long_entry and position.direction == -1:
+                    pending_exit_direction = -1
+                    pending_exit_signal = "Price crossed above upper band"
+                elif short_entry and position.direction == 1:
+                    pending_exit_direction = 1
+                    pending_exit_signal = "Price crossed below lower band"
 
         def _schedule_entry(direction: int, signal: str) -> None:
             nonlocal pending_entry_direction, pending_entry_contracts, pending_entry_signal, pending_entry_in_window
@@ -742,9 +1042,19 @@ def _run_kema_option(
                 channel_delta,
                 atr_value,
                 price,
+                req.lot_size,
+                req.round_quantity,
             )
             if desired_contracts <= 0:
                 return
+            if immediate_fill:
+                filled = (
+                    _enter_long_now(desired_contracts, signal, execution_price, timestamp)
+                    if direction == 1
+                    else _enter_short_now(desired_contracts, signal, execution_price, timestamp)
+                )
+                if filled:
+                    return
             pending_entry_direction = direction
             pending_entry_contracts = desired_contracts
             pending_entry_signal = signal
@@ -798,7 +1108,7 @@ def _run_kema_option(
 
     if position is not None:
         last_price = candles[-1].close
-        cash, wins, losses, cumulative_profit = _close_and_record_trade(
+        cash, wins, losses, breakevens, cumulative_profit = _close_and_record_trade(
             position,
             last_price,
             fee_rate,
@@ -808,6 +1118,7 @@ def _run_kema_option(
             cash,
             wins,
             losses,
+            breakevens,
             cumulative_profit,
         )
         position = None
@@ -818,7 +1129,8 @@ def _run_kema_option(
     total_profit = equity_curve[-1].equity - req.initialCapital if equity_curve else 0.0
     roi_percent = (total_profit / req.initialCapital * 100) if req.initialCapital else 0.0
     total_trades = len(trades)
-    winrate = (wins / total_trades * 100) if total_trades else 0.0
+    effective_trades = total_trades - breakevens
+    winrate = (wins / effective_trades * 100) if effective_trades > 0 else 0.0
 
     return BacktestResponse(
         totalProfit=round(total_profit, 2),
@@ -834,6 +1146,10 @@ def _run_kema_option(
             if points
         },
         annotatedCandles=annotated_candles,
+        lot_size=req.lot_size,
+        round_quantity=req.round_quantity,
+        execution_model=req.execution_model,
+        breakevenTrades=breakevens,
     )
 
 

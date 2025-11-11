@@ -4,12 +4,19 @@ type Props = {
   metrics?: BacktestResponse;
 };
 
-const METRIC_LABELS: Record<keyof Pick<BacktestResponse, "totalProfit" | "roiPercent" | "maxDrawdown" | "winrate" | "numberOfTrades">, string> = {
+const METRIC_LABELS: Record<
+  keyof Pick<
+    BacktestResponse,
+    "totalProfit" | "roiPercent" | "maxDrawdown" | "winrate" | "numberOfTrades" | "breakevenTrades"
+  >,
+  string
+> = {
   totalProfit: "Total Profit",
   roiPercent: "ROI %",
   maxDrawdown: "Max Drawdown %",
   winrate: "Win Rate %",
   numberOfTrades: "# Trades",
+  breakevenTrades: "Breakeven",
 };
 
 const MetricsPanel = ({ metrics }: Props) => {
@@ -26,7 +33,9 @@ const MetricsPanel = ({ metrics }: Props) => {
       {Object.entries(METRIC_LABELS).map(([key, label]) => {
         const value = metrics[key as keyof typeof METRIC_LABELS];
         const formatted =
-          typeof value === "number" && key !== "numberOfTrades" ? value.toFixed(2) : value;
+          typeof value === "number" && !["numberOfTrades", "breakevenTrades"].includes(key)
+            ? value.toFixed(2)
+            : value;
         return (
           <div className="metric-card" key={key}>
             <span className="metric-label">{label}</span>

@@ -59,6 +59,18 @@ class BacktestRequest(BaseModel):
     strategyRules: StrategyRules
     startTime: Optional[datetime] = Field(None, description="Optional starting timestamp")
     endTime: Optional[datetime] = Field(None, description="Optional ending timestamp")
+    lot_size: float = Field(
+        0.0001,
+        ge=0,
+        description="Quantity lot size step used for rounding (set 0 to disable rounding)",
+    )
+    round_quantity: bool = Field(True, description="Whether to round order quantity to the lot size")
+    execution_model: Literal["close_signal_bar", "open_next_bar"] = Field(
+        "close_signal_bar",
+        description=(
+            "Order execution timing: close current signal bar (default) or open of the next bar"
+        ),
+    )
 
 
 class TradeResult(BaseModel):
@@ -105,10 +117,14 @@ class BacktestResponse(BaseModel):
     maxDrawdown: float
     winrate: float
     numberOfTrades: int
+    breakevenTrades: int
     equityCurve: List[EquityPoint]
     executedTrades: List[TradeResult]
     indicatorLines: Dict[str, List[IndicatorPoint]] = Field(default_factory=dict)
     annotatedCandles: List[AnnotatedCandle] = Field(default_factory=list)
+    lot_size: float
+    round_quantity: bool
+    execution_model: Literal["close_signal_bar", "open_next_bar"]
 
 
 class DataImportJob(BaseModel):
